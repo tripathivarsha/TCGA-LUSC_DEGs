@@ -1,0 +1,84 @@
+setwd("C:/Users/manis/OneDrive/Desktop")
+# ==========================================================
+# Step 1: Install and load required packages
+# ==========================================================
+  install.packages("BiocManager")
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DESeq2)
+library(ggplot2)
+library(edgeR)
+# #################################################
+Step 2: Download TCGA-LUSC RNA-seq data (HTSeq counts)
+##################################################
+query.exp <- GDCquery(
+  project = "TCGA-LUSC", 
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification", 
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor","Solid Tissue Normal")
+)
+GDCdownload(
+  query = query.exp,
+  files.per.chunk = 100
+)
+lusc.exp <- GDCprepare(
+  query = query.exp, 
+  save = TRUE, 
+  save.filename = "luscExp.rda"
+)
+ ########################################################
+Step 3- get subtype information
+#########################################################
+infomation.subtype <- TCGAquery_subtype(tumor = "LUSC")
+
+########### get clinical data####################
+information.clinical <- GDCquery_clinic(project = "TCGA-LUSC",type = "clinical") 
+
+################# Which samples are Primary Tumor###################
+samples.primary.tumour <- lusc.exp$barcode[lusc.exp$shortLetterCode == "TP"]
+
+################## which samples are solid tissue normal###############
+samples.solid.tissue.normal <- lusc.exp$barcode[lusc.exp$shortLetterCode == "NT"]
+###########################################################################
+Step 4- Using TCGAnalyze_DEA, we identified differentially expression genes (DEG) (log2 fold change >=1 and FDR < 1%) between normal and tumor LUSC samples.
+##########################################################################
+dataPrep <- TCGAanalyze_Preprocessing(
+  object = lusc.exp, 
+  cor.cut = 0.6
+)                      
+dataNorm <- TCGAanalyze_Normalization(
+  tabDF = dataPrep,
+  geneInfo = geneInfoHT,
+  method = "gcContent"
+)                
+
+dataFilt <- TCGAanalyze_Filtering(
+  tabDF = dataNorm,
+  method = "quantile", 
+  qnt.cut =  0.25
+)   
+dataDEGs <- TCGAanalyze_DEA(
+  mat1 = dataFilt[,samples.solid.tissue.normal],
+  mat2 = dataFilt[,samples.primary.tumour],
+  Cond1type = "Normal",
+  Cond2type = "Tumor",
+  fdr.cut = 0.01 ,
+  logFC.cut = 2,
+  method = "glmLRT",
+  pipeline = "edgeR"
+)
+
+ =====================================================
+# Step 5: Identify Significant DEGs ## Differential expression analysis 
+# Criteria: padj < 0.05 and |log2FoldChange| > 1
+# =====================================================
+dataDEGs <- padj < 0.05 & (log2FoldChange) > 1)
+Up <- dataDEGs [DEG$log2FoldChange > 1, ]
+Down <- dataDEGs[DEG$log2FoldChange < -1, ]
+
+write.csv(Up, "Upregulated_genes.csv", row.names = TRUE)
+write.csv(Down, "Downregulated_genes.csv", row.names = TRUE)
+
+
+
