@@ -1,0 +1,108 @@
+                                                NSCLC_GSE226773 DeSeq2 analysis-
+
+ Version info: R 4.3.3, Biobase 2.58.0, GEOquery 2.66.0, 
+### Differential expression analysis with DESeq2###
+library(DESeq2)
+########### load counts table from GEO#####################
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+path <- paste(urld, "acc=GSE226773", "file=GSE226773_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+tbl_GSM <- as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames="GeneID")
+########## load gene annotations ##############
+apath <- paste(urld, "type=rnaseq_counts", "file=Human.GRCh38.p13.annot.tsv.gz", sep="&")
+annot <- data.table::fread(apath, header=T, quote="", stringsAsFactors=F, data.table=F)
+rownames(annot) <- annot$GeneID
+#### sample selection####
+gsms <- "1010"
+sml <- strsplit(gsms, split="")[[1]]
+##### group membership for samples####
+gs <- factor(sml)
+groups <- make.names(c("TUMOR","NORMAL"))
+levels(gs) <- groups
+sample_info <- data.frame(Group = gs, row.names = colnames(tbl_GSM))
+### pre-filter low count genes###
+ keep genes with at least N counts > 10, where N = size of smallest group
+keep <- rowSums( tbl >= 10 ) >= min(table(gs))
+tbl_GSM <- tbl_GSM[keep, ]
+ds <- DESeqDataSetFromMatrix(countData=tbl, colData=sample_info, design= ~Group)
+ds <- DESeq(ds, test="Wald", sfType="poscount")
+
+#### extract top genes from table###
+r <- results (ds, contrast=c("Group", groups[1], groups[2]), alpha=0.05, pAdjustMethod ="fdr")
+top_genes <- r[order(r$padj)[1:1000],] 
+top_genes <- merge(as.data.frame(tT), annot, by=0, sort=F)
+top_genes <- subset(top_genes, select=c("GeneID","padj","pvalue","lfcSE","stat","log2FoldChange","baseMean","Symbol","Description"))
+write.table(top_genes, file=stdout(), row.names=F, sep="\t")
+#### create histogram plot of p-values####
+hist(r$padj, breaks=seq(0, 1, length = 21), col = "blue", border = "white", 
+         xlab = "", ylab = "", main = "GSE226773 Frequencies of padj-values")
+#######Generate volcano plot #######
+old.pal <- palette(c("#00BFFF", "#FF3030")) # low-hi colors
+par(mar=c(4,4,2,1), cex.main=1.5)
+plot(r$log2FoldChange, -log10(r$padj), main=paste(groups[1], "vs", groups[2]),
+     xlab="log2FC", ylab="-log10(Padj)", pch=20, cex=0.5)
+with(subset(r, padj<0.05 & abs(log2FoldChange) >= 0),
+     points(log2FoldChange, -log10(padj), pch=20, col=(sign(log2FoldChange) + 3)/2, cex=1))
+legend("bottomleft", title=paste("Padj<", 0.05, sep=""), legend=c("down", "up"), pch=20,col=1:2)
+
+
+#####- Heatmap of top DEGs after Volcano Plot ####
+
+# Load required library
+library(pheatmap)
+# Select top DEGs (for example, top 50 with padj < 0.05)
+top_DEGs <- r[order(r$padj), ][1:50, ]   # adjust number if needed
+# Extract normalized expression data (assuming 'norm_counts' or similar matrix available)
+# If you already have normalized data, use it here. Otherwise, use log2FoldChange for illustration.
+# Example: using log2FoldChange to visualize relative expression
+heatmap_data <- as.matrix(top_DEGs$log2FoldChange)
+rownames(heatmap_data) <- top_DEGs$Gene
+# Convert to a matrix suitable for pheatmap
+heatmap_data <- as.matrix(top_DEGs[, "log2FoldChange", drop=FALSE])
+### Create color palette###
+heat_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(50)
+## Generate heatmap##
+pheatmap(heatmap_data,
+         color = heat_colors,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         scale = "none",
+         fontsize_row = 8,
+         fontsize_col = 10,
+         main = "Heatmap of Top Differentially Expressed Genes")
+
+###### MD plot##########
+par(mar=c(4,4,2,1), cex.main=1.5)
+plot(log10(r$baseMean), r$log2FoldChange, main=paste(groups[1], "vs", groups[2]),
+     xlab="log10(mean of normalized counts)", ylab="log2FoldChange", pch=20, cex=0.5)
+with(subset(r, padj<0.05 & abs(log2FoldChange) >= 0),
+     points(log10(baseMean), log2FoldChange, pch=20, col=(sign(log2FoldChange) + 3)/2, cex=1))
+legend("bottomleft", title=paste("Padj<", 0.05, sep=""), legend=c("down", "up"), pch=20,col=1:2)
+abline(h=0)
+palette(old.pal) # restore palette
+######  General expression data visualization############
+dat <- log10(counts (ds, normalized = T) + 1) # extract normalized counts
+
+
+##### box plot and-whisker plot###########
+lbl <- "log10(raw counts + 1)"
+ord <- order(gs)  # order samples by group
+palette(c("#1B9E77", "#7570B3", "#E7298A", "#E6AB02", "#D95F02",
+          "#66A61E", "#A6761D", "#B32424", "#B324B3", "#666666"))
+par(mar=c(7,4,2,1))
+boxplot(dat[,ord], boxwex=0.6, notch=T, main="GSE226773", ylab="lg(norm.counts)", outline=F, las=2, col=gs[ord])
+legend("topleft", groups, fill=palette(), bty="n")
+
+##### UMAP plot (multi-dimensional scaling) #####
+library(umap)
+dat <- dat[!duplicated(dat), ] # first remove duplicates
+par(mar=c(3,3,2,6), xpd=TRUE, cex.main=1.5)
+ump <- umap(t(dat), n_neighbors = 2, random_state = 123)
+plot(ump$layout, main="UMAP plot, nbrs=2", xlab="", ylab="", col=gs, pch=20, cex=1.5)
+legend("topright", inset=c(-0.15,0), legend=groups, pch=20,
+       col=1:length(groups), title="Group", pt.cex=1.5)
+
+
+
+
+
+
