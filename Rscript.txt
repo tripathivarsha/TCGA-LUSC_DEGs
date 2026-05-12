@@ -1,0 +1,252 @@
+library(TCGAWorkflowData)
+library(DT)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(caret)
+
+query.exp.lgg <- GDCquery(
+  project = "TCGA-LUSC",
+  legacy = TRUE,
+  data.category = "Gene expression",
+  data.type = "Gene expression quantification",
+  platform = "Illumina HiSeq",
+  file.type = "results",
+  sample.type = "Primary Tumor"
+)
+GDCdownload(query.exp.lusc)
+exp.lusc <- GDCprepare(query = query.exp.lusc, save = TRUE, save.filename = "luscExp.rda")
+
+#-----------------------------------------------------------------------------
+#                   Data.category: Copy number variation aligned to hg38
+#-----------------------------------------------------------------------------
+query <- GDCquery(
+  project = "TCGA-LUSC",
+  data.category = "Copy Number Variation",
+  data.type = "Copy Number Segment"
+)
+GDCdownload(query)
+data <- GDCprepare(query)
+
+query <- GDCquery(
+  project = "TCGA-LUSC",
+  data.category = "Copy Number Variation",
+  data.type = "Masked Copy Number Segment",
+  sample.type = c("Primary Tumor")
+) # see the barcodes with getResults(query)$cases
+GDCdownload(query)
+data <- GDCprepare(query)
+library(SummarizedExperiment)
+# get expression matrix
+data <- assay(exp.lusc)
+datatable(
+  data = data[1:10,],
+  options = list(scrollX = TRUE, keys = TRUE, pageLength = 5),
+  rownames = TRUE
+)
+# get genes information
+genes.info <- rowRanges(exp.lusc)
+genes.info
+# get sample information
+sample.info <- colData(exp.lusc)
+datatable(
+  data = as.data.frame(sample.info),
+  options = list(scrollX = TRUE, keys = TRUE, pageLength = 5),
+  rownames = FALSE
+)
+
+# get indexed clinical patient data for LGG samples
+lgg_clin <- GDCquery_clinic(project = "TCGA-LUSC", type = "Clinical")
+
+# Bind the results, as the columns might not be the same,
+# we will will plyr rbind.fill, to have all columns from both files
+clinical <- lgg_clin
+datatable(clinical[1:10,], options = list(scrollX = TRUE, keys = TRUE), rownames = FALSE)
+# Fetch clinical data directly from the clinical XML files.
+# if barcode is not set, it will consider all samples.
+# We only set it to make the example faster
+query <- GDCquery(
+  project = "TCGA-LUSC",
+  file.type = "xml",
+  data.category = "Clinical",
+)
+GDCdownload(query)
+clinical <- GDCprepare_clinic(query, clinical.info = "patient")
+datatable(clinical, options = list(scrollX = TRUE, keys = TRUE), rownames = FALSE)
+clinical.drug <- GDCprepare_clinic(query, clinical.info = "drug")
+datatable(clinical.drug, options = list(scrollX = TRUE, keys = TRUE), rownames = FALSE)
+clinical.radiation <- GDCprepare_clinic(query, clinical.info = "radiation")
+datatable(clinical.radiation, options = list(scrollX = TRUE,  keys = TRUE), rownames = FALSE)
+clinical.admin <- GDCprepare_clinic(query, clinical.info = "admin")
+datatable(clinical.admin, options = list(scrollX = TRUE, keys = TRUE), rownames = FALSE)
+LUSCmut <- GDCquery_Maf(tumor = "LUSC", pipelines = "mutect2")
+data(mafMutect2LGGGBM)
+datatable(LUSCmut[1:10,], options = list(scrollX = TRUE, keys = TRUE), rownames = FALSE)
+lusc.subtypes <- TCGAquery_subtype(tumor = "lusc")
+datatable(gbm.subtypes[1:10,], options = list(scrollX = TRUE, keys = TRUE), rownames = FALSE)
+library(RTCGAToolbox)
+# Get the last run dates
+lastRunDate <- getFirehoseRunningDates()[1]
+
+# get DNA methylation data, RNAseq2 and clinical data for LUSC
+lusc.data <- getFirehoseData(
+  dataset = "LUSC",
+  runDate = lastRunDate,
+  gistic2Date = getFirehoseAnalyzeDates(1),
+  Methylation = FALSE,  
+  clinical = TRUE,
+  RNASeq2GeneNorm  = FALSE,
+  Mutation = TRUE,
+  fileSizeLimit = 10000
+)
+
+lusc.mut <- getData(gbm.data,"Mutation")
+lusc.clin <- getData(gbm.data,"clinical")
+# Download GISTIC results
+lastanalyzedate <- getFirehoseAnalyzeDates(1)
+gistic <- getFirehoseData("LUSC",GISTIC = TRUE, gistic2Date = lastanalyzedate)
+
+# get GISTIC results
+gistic.allbygene <- getData(gistic, type = "GISTIC", platform = "AllByGene")
+gistic.thresholedbygene <- getData(gistic, type = "GISTIC", platform = "ThresholdedByGene")
+
+data(LUSCGistic)
+gistic.allbygene %>% head() %>% gt::gt()
+
+gistic.thresholedbygene %>% head() %>% gt::gt()
+
+# Download Mutation Annotation Format (MAF) files
+LUSCmut <- GDCquery_Maf(tumor = "LUSC", pipelines = "mutect2")
+# Merge them
+mut <- plyr::rbind.fill(LGGmut)
+save(mut,file ="mafMutect2LUSC.rda", compress = "xz")
+library(maftools)
+# recovering data from TCGAWorkflowData package.
+data(mafMutect2LUSC)
+
+# To prepare for maftools we will also include clinical data
+# For a mutant vs WT survival analysis
+# get indexed clinical patient data for LUSCsamples
+LUSC_clin <- GDCquery_clinic(project = "TCGA-LUSC", type = "Clinical")
+# get indexed clinical patient data for LUSC samples
+
+clinical <- plyr::rbind.fill(gbm_clin)
+colnames(clinical)[1] <- "Tumor_Sample_Barcode"
+
+# we need to create a binary variable 1 is dead 0 is not dead
+plyr::count(clinical$vital_status)
+clinical$Overall_Survival_Status <- 1 # dead
+clinical$Overall_Survival_Status[which(clinical$vital_status != "Dead")] <- 0
+
+# If patient is not dead we don't have days_to_death (NA)
+# we will set it as the last day we know the patient is still alive
+clinical$time <- clinical$days_to_death
+clinical$time[is.na(clinical$days_to_death)] <- clinical$days_to_last_follow_up[is.na(clinical$days_to_death)]
+
+# Create object to use in maftools
+maf <- read.maf(maf = mut, clinicalData = clinical, isTCGA = TRUE)
+plotmafSummary(
+  maf = maf,
+  rmOutlier = TRUE,
+  addStat = 'median',
+  dashboard = TRUE
+)
+
+oncoplot(
+  maf = maf,
+  top = 20,
+  legendFontSize = 8,
+  clinicalFeatures = c("tissue_or_organ_of_origin")
+)
+plot <- mafSurvival(
+  maf = maf,
+  genes = "TP53",
+  time = 'time',
+  Status = 'Overall_Survival_Status',
+  isTCGA = TRUE
+)
+
+library(TCGAutils)
+library(curatedTCGAData)
+library(MultiAssayExperiment)
+library(RTCGAToolbox)
+library(BiocFileCache)
+library(rtracklayer)
+library(R.utils)
+library(GenomicDataCommons)
+library(EDASeq)
+LUSCMatrix <- assay(lusc.exp.TR,"raw_count")
+LUSCNormalMatrix <- assay(lusc.exp,"raw_count")
+KICHNormalRnaseq_CorOutliers <- TCGAanalyze_Preprocessing(lusc.exp.TR)
+KICHRnaseq_CorOutliers <- TCGAanalyze_Preprocessing(kich.exp)
+tabDF = cbind(KICHNormalRnaseq_CorOutliers, LUSCRnaseq_CorOutliers)
+dataNorm <- TCGAanalyze_Normalization(tabDF, geneInfo =  geneInfo)
+dataFilt <- TCGAanalyze_Filtering(tabDF = dataNorm,
+                                  method = "quantile",
+                                  qnt.cut =  0.25)
+# selection of normal samples "NT"
+samplesNT <- TCGAquery_SampleTypes(barcode = colnames(dataFilt),
+                                   typesample = c("TR"))
+
+# selection of tumor samples "TP"
+samplesTP <- TCGAquery_SampleTypes(barcode = colnames(dataFilt),
+                                   typesample = c("TP"))
+# Diff.expr.analysis (DEA)
+dataDEGs <- TCGAanalyze_DEA(mat1 = dataFilt[,samplesNT],
+                            mat2 = dataFilt[,samplesTP],
+                            Cond1type = "Normal",
+                            Cond2type = "Tumor",
+                            fdr.cut = 0.01 ,
+                            logFC.cut = 1,
+                            method = "glmLRT")
+
+# DEGs table with expression values in normal and tumor samples
+dataDEGsFiltLevel <- TCGAanalyze_LevelTab(dataDEGs,"Tumor","Normal",
+                                          dataFilt[,samplesTP],dataFilt[,samplesNT])
+
+#####HEATMAP PLOT#################
+library(pheatmap)
+dataDEGs <- dataDEGs[order(dataDEGs$FDR, decreasing = FALSE),]
+#genes.int <- dataDEGsFiltLevel[1:40,1]
+##OR##
+genes.int <- row.names(dataDEGs)[1:40]
+
+heat.data <- dataDEGs[rownames(dataDEGs) %in% genes.int,]
+##or##
+heat.data <- dataDEGs[genes.int,]
+
+heat.data <- scale(heat.data)
+
+pheatmap(heat.data, show_colnames = FALSE, fontsize_row = 6)
+
+
+
+
+
+# Number of differentially expressed genes (DEG)
+nrow(dataDEGs)
+
+
+#-------------------  4.2 EA: enrichment analysis             --------------------
+ansEA <- TCGAanalyze_EAcomplete(
+  TFname = "DEA genes LUSC",
+  RegulonList = rownames(dataDEGs)
+)
+
+library(TCGAbiolinks)
+# Enrichment Analysis EA
+# Gene Ontology (GO) and Pathway enrichment by DEGs list
+Genelist <- rownames(dataDEGsFiltLevel)
+
+system.time(ansEA <- TCGAanalyze_EAcomplete(TFname="DEA genes Normal Vs Tumor",Genelist))
+
+# Enrichment Analysis EA (TCGAVisualize)
+# Gene Ontology (GO) and Pathway enrichment barPlot
+
+TCGAvisualize_EAbarplot(tf = rownames(ansEA$ResBP),
+                        GOBPTab = ansEA$ResBP,
+                        GOCCTab = ansEA$ResCC,
+                        GOMFTab = ansEA$ResMF,
+                        PathTab = ansEA$ResPat,
+                        nRGTab = Genelist,
+                        nBar = 10)
+
